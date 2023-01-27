@@ -18,7 +18,7 @@ mod benchmarking;
 pub mod pallet {
 	use frame_support::{
 		pallet_prelude::*,
-		traits::{Currency, FindAuthor, LockableCurrency, ReservableCurrency},
+		traits::{Currency, LockableCurrency, ReservableCurrency},
 	};
 	use frame_system::pallet_prelude::*;
 	use sp_consensus_aura::{Slot, AURA_ENGINE_ID};
@@ -34,6 +34,7 @@ pub mod pallet {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
+		pub type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 		/// Type to access the Balances Pallet.
 		type Currency: Currency<Self::AccountId>
 			+ ReservableCurrency<Self::AccountId>
