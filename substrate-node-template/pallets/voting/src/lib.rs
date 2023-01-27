@@ -356,7 +356,7 @@ use frame_support::{
 			//ensure!(proposal.is_some(), Error::<T>::ProposalNotFound);
 			//let mut proposal: Proposal<T> = proposal.unwrap();
 
-			// same!
+			// same! and even better
 			let mut proposal = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
 
 			let current_block_number = <frame_system::Pallet<T>>::block_number();
