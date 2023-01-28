@@ -125,7 +125,7 @@ use frame_support::{
 		///A registered voter casted a vote for a specific proposal
 		VoteCasted {proposal_id: ProposalId, who: T::AccountId},
 		///Registered voter updated his vote with new amount
-		VoteUpdated {proposal_id: ProposalId, who: T::AccountId, previous: u32, new: u32},
+		VoteUpdated {proposal_id: ProposalId, who: T::AccountId, previous: VoteDecision, new: VoteDecision},
 		///A voter canceled his vote for an ongoing proposal
 		VoteCanceled { proposal_id: ProposalId, who: T::AccountId},
 		///Proposal ended and result is defined 
@@ -363,12 +363,14 @@ use frame_support::{
 					v
 				},
 				VoteDecision::Nay(v) => {
-					//Check threshold
-					ensure!(!Self::passed_removal_threshold(&proposal.time_period), Error::<T>::PassedRemovalThreshold);
 					proposal.nays += v;
 					v
 				}
 			};
+			if new_amount.cmp(&current_amount) == Ordering::Less {
+				//Check threshold
+				ensure!(!Self::passed_removal_threshold(&proposal.time_period), Error::<T>::PassedRemovalThreshold);
+			}
 			
 			ensure!(new_amount != 0, Error::<T>::InvalidUpdateAmount);
 
@@ -385,9 +387,14 @@ use frame_support::{
 
 			let new_vote = Vote {vote_decision: new_vote_decision, locked: true};
 
-			<Votes<T>>::insert(who.clone(), proposal_id, new_vote);
+			<Votes<T>>::insert(who.clone(), proposal_id, new_vote.clone());
 			<Proposals<T>>::insert(proposal_id, proposal);
-			Self::deposit_event(Event::VoteCasted {proposal_id, who});
+			Self::deposit_event(Event::VoteUpdated { 
+				proposal_id, 
+				who, 
+				previous: current_vote.vote_decision, 
+				new: new_vote.vote_decision 
+			});
 
 			Ok(())
 		}
