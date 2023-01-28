@@ -56,7 +56,10 @@ impl frame_system::Config for Test {
 parameter_types! {
 	pub const ExistentialDeposit: u64 = 1;
 	pub const MaxLocks: u32 = 10;
+	pub const MaxVoters: u32 = 100;
+	pub static VoteRemovalThreshold: u32 = 20;
 }
+
 impl pallet_balances::Config for Test {
 	type Balance = u128;
 	type DustRemoval = ();
@@ -72,6 +75,8 @@ impl pallet_balances::Config for Test {
 impl pallet_voting::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
+	type MaxVoters = MaxVoters;
+	type VoteRemovalThreshold = VoteRemovalThreshold;
 }
 
 // Build genesis storage according to the mock runtime.

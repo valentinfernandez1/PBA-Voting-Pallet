@@ -1,290 +1,514 @@
-use crate::{mock::*, Error, Event, Proposal, ProposalStatus, Vote};
-use frame_support::{assert_noop, assert_ok};
+use crate::{mock::*, Error, Event, Proposal, ProposalStatus, VoteDecision};
+use frame_support::{assert_noop, assert_ok, traits::{Currency}};
 
-#[test]
-fn voter_registration(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(1);
 
-		//Register new voter
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
-		assert!(Voting::is_registered(&2));
-		assert!(System::events().len() == 1);
-		System::assert_last_event(Event::VoterRegistered { who: 2 }.into());
 
-		//Try to re-register the same voter;
-		assert_noop!(Voting::register_voter(RuntimeOrigin::root(), 2), Error::<Test>::AlreadyRegistered);
-	});
+mod register_voter {
+	use super::*;	
+	
+	#[test]
+	fn voter_registration(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(1);
+
+			//Register new voter
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
+			assert!(Voting::is_registered(&2));
+			assert!(System::events().len() == 1);
+			System::assert_last_event(Event::VoterRegistered { who: 2 }.into());
+
+			//Try to re-register the same voter;
+			assert_noop!(Voting::register_voter(RuntimeOrigin::root(), 2), Error::<Test>::AlreadyRegistered);
+		});
+	}
+
+	#[test]
+	fn register_invalid_origin(){
+		new_test_ext().execute_with(|| {
+			assert_noop!(Voting::register_voter(RuntimeOrigin::signed(1), 2), sp_runtime::DispatchError::BadOrigin);
+		});
+	}
+	
 }
 
-#[test]
-fn register_invalid_origin(){
-	new_test_ext().execute_with(|| {
-		assert_noop!(Voting::register_voter(RuntimeOrigin::signed(1), 2), sp_runtime::DispatchError::BadOrigin);
-	});
+mod create_proposal {
+	use super::*;	
+	
+	#[test]
+	fn make_proposal(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(82);
+			let initial_proposal_id = Voting::get_proposal_counter();
+			let new_proposal_id = initial_proposal_id + 1; 
+
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			assert!(Voting::proposal_exists(new_proposal_id));
+
+			assert!(System::events().len() == 1);
+			System::assert_last_event(Event::ProposalSubmitted { proposal_id: new_proposal_id, who: 1 }.into());
+
+			assert_eq!(initial_proposal_id+1, Voting::get_proposal_counter());
+		});
+	} 
+
+
+	#[test]
+	fn proposal_time_low(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(82);
+			
+			assert_noop!(Voting::make_proposal(
+				RuntimeOrigin::signed(1), 
+				sp_core::H256::zero(), 
+				80
+			), Error::<Test>::TimePeriodToLow );
+
+		});
+	}
 }
 
-#[test]
-fn make_proposal(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(82);
-		let initial_proposal_id = Voting::get_proposal_counter();
-		let new_proposal_id = initial_proposal_id + 1; 
+mod update_proposal_time {
+	use super::*;	
+	
+	#[test]
+	fn update_proposal(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-		assert!(Voting::proposal_exists(new_proposal_id));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			assert_ok!(Voting::increase_proposal_time(RuntimeOrigin::signed(1), proposal_id, 95));
 
-		assert!(System::events().len() == 1);
-		System::assert_last_event(Event::ProposalSubmitted { proposal_id: new_proposal_id, who: 1 }.into());
+			System::assert_last_event(Event::ProposalUpdated { proposal_id, end_block: 95 }.into());
 
-		assert_eq!(initial_proposal_id+1, Voting::get_proposal_counter());
-	});
-} 
+			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
+			assert_eq!(updated_proposal.time_period, 95)
+		});
+	}
 
+	#[test]
+	fn update_proposal_invalid(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
 
-#[test]
-fn proposal_time_low(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(82);
-		
-		assert_noop!(Voting::make_proposal(
-			RuntimeOrigin::signed(1), 
-			sp_core::H256::zero(), 
-			80
-		), Error::<Test>::TimePeriodToLow );
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			assert_noop!(
+				Voting::increase_proposal_time(RuntimeOrigin::signed(1), proposal_id, 75),
+				Error::<Test>::TimePeriodToLow
+			);
+		});
+	}
 
-	});
+	#[test]
+	fn invalid_proposer_update(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			assert_noop!(
+				Voting::increase_proposal_time(RuntimeOrigin::signed(2), proposal_id, 95),
+				Error::<Test>::Unauthorized
+			);
+		});
+	}
 }
 
-#[test]
-fn update_proposal(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(30);
-		let proposal_id = Voting::get_proposal_counter() + 1;
+mod cancel_proposal {
+	use super::*;	
+	
+	#[test]
+	fn proposal_canceled(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-		assert_ok!(Voting::increase_proposal_time(RuntimeOrigin::signed(1), proposal_id, 95));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			assert_ok!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::ProposalCanceled { proposal_id }.into());
 
-		System::assert_last_event(Event::ProposalUpdated { proposal_id, end_block: 95 }.into());
+			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
+			assert_eq!(updated_proposal.status, ProposalStatus::Canceled);
+		});
+	}
 
-		let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
-		assert_eq!(updated_proposal.time_period, 95)
-	});
+	#[test]
+	fn proposal_cant_be_canceled(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+
+			System::set_block_number(100);
+
+			assert_noop!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::TimePeriodToLow);
+		});
+	}
 }
 
-#[test]
-fn update_proposal_invalid(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(30);
-		let proposal_id = Voting::get_proposal_counter() + 1;
+mod vote {
+	use super::*;	
+	
+	#[test]
+	fn cast_valid_votes(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+			
+			//Vote in favor and verify that the functions excecutes properly and the event is created
+			let vote_amount: u32 = 2;
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_amount)));
+			System::assert_last_event(Event::VoteCasted { proposal_id, who: 1 }.into());
+			
+			//Check that the reserved amount from the user is (amount of votes^2)
+			let user_balance = Balances::free_balance(&1);
+			assert_eq!(initial_balance , user_balance as u32 + vote_amount.pow(2));
+			
+			//Check that the vote is in storage and the proposal updated properly
+			assert!(Voting::vote_casted(&1, &proposal_id));
+			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
+			assert_eq!(updated_proposal.ayes, vote_amount);
+			
+			//Vote nay and verify that the changes are correct in storage
+			Balances::make_free_balance_be(&2, 25u32.into());
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(2), proposal_id, VoteDecision::Nay(vote_amount)));
+			System::assert_last_event(Event::VoteCasted { proposal_id, who: 2 }.into());
+			assert!(Voting::vote_casted(&2, &proposal_id));
+			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
+			assert_eq!(updated_proposal.nays, vote_amount);
+		});
+	}
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-		assert_noop!(
-			Voting::increase_proposal_time(RuntimeOrigin::signed(1), proposal_id, 75),
-			Error::<Test>::TimePeriodToLow
-		);
-	});
+	#[test]
+	fn voter_not_registered(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(1)), Error::<Test>::VoterIsNotRegistered);
+		});
+	}
+
+	#[test]
+	fn vote_already_casted(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(1)));
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id,VoteDecision::Aye(1)), Error::<Test>::VoteAlreadyCasted);
+		});
+	}
+
+	#[test]
+	fn invalid_proposal(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(2)), Error::<Test>::ProposalNotFound);
+		});
+	}
+
+	#[test]
+	fn ended_proposal(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 10));
+
+			System::set_block_number(20);
+
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(2)), Error::<Test>::ProposalAlreadyEnded);
+		});
+	}
+
+	#[test]
+	fn invalid_vote_amount(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(0)), Error::<Test>::InvalidVoteAmount);
+		});
+	}
 }
 
-#[test]
-fn invalid_proposer_update(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(30);
-		let proposal_id = Voting::get_proposal_counter() + 1;
+mod finish_proposal {
+	use super::*;	
+	
+	#[test]
+	fn proposal_passed(){
+		new_test_ext().execute_with(||{
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			Balances::make_free_balance_be(&1, 25u32.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-		assert_noop!(
-			Voting::increase_proposal_time(RuntimeOrigin::signed(2), proposal_id, 95),
-			Error::<Test>::Unauthorized
-		);
-	});
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(1)));
+
+			System::set_block_number(6);
+
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Passed }.into());
+		});
+	}
+
+
+	#[test]
+	fn proposal_rejected(){
+		new_test_ext().execute_with(||{
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			Balances::make_free_balance_be(&1, 25u32.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Nay(1)));
+
+			System::set_block_number(6);
+
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Rejected }.into());
+		});
+	}
+
+	#[test]
+	fn proposal_tied(){
+		new_test_ext().execute_with(||{
+			System::set_block_number(1);
+
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			System::set_block_number(6);
+
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Tied }.into());
+		});
+	}
+
+	#[test]
+	fn finish_proposal_fails_if_canceled(){
+		new_test_ext().execute_with(||{
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+			assert_ok!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id));
+
+			assert_noop!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::ProposalAlreadyEnded);
+		});
+	}
+
+	#[test]
+	fn finish_proposal_early_rejects(){
+		new_test_ext().execute_with(||{
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_noop!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::ProposalAlreadyEnded);
+		});
+	}
 }
 
 
-#[test]
-fn proposal_canceled(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(30);
-		let proposal_id = Voting::get_proposal_counter() + 1;
+mod unlock_balance {
+	use super::*;
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-		assert_ok!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id));
-		System::assert_last_event(Event::ProposalCanceled { proposal_id }.into());
+	#[test]
+	fn unlock_balance(){
+		new_test_ext().execute_with(||{
+			// initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
 
-		let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
-		assert_eq!(updated_proposal.status, ProposalStatus::Canceled);
-	});
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
+			System::set_block_number(6);
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+
+			//try to unlock balance
+			assert_ok!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id));
+			//Check that the reserved amount from the user is (amount of votes^2)
+			let current_balance = Balances::free_balance(&1);
+			assert_eq!(initial_balance as u128, current_balance);
+		});
+	}
+
+	#[test]
+	fn cant_unlock_before_proposal_end(){
+		new_test_ext().execute_with(||{
+			// initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
+	
+			//try to unlock balance
+			assert_noop!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::ProposalInProgress);
+		});
+	}
+	#[test]
+	fn vote_not_found(){
+		new_test_ext().execute_with(||{
+			// initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+			System::set_block_number(6);
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+
+			//try to unlock balance
+			assert_noop!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::VoteNotFound);
+		});
+	}
+	
+	#[test]
+	fn balance_already_unlocked(){
+		new_test_ext().execute_with(||{
+			// initial setup
+			System::set_block_number(1);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
+			System::set_block_number(6);
+			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
+			//Unlock balance
+			assert_ok!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id));
+
+			//Try to unlock again
+			assert_noop!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::BalanceAlreadyUnocked);
+		});
+	}
 }
 
-#[test]
-fn proposal_cant_be_canceled(){
-	new_test_ext().execute_with(|| {
-		System::set_block_number(30);
-		let proposal_id = Voting::get_proposal_counter() + 1;
+mod cancel_vote {
+	use super::*;
 
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+	#[test]
+	fn cancel_vote_succesfully(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			let initial_balance: u32 = 25;
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 40));
+			
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
 
-		System::set_block_number(100);
+			assert_ok!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::VoteCanceled { proposal_id, who: 1 }.into());
 
-		assert_noop!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::TimePeriodToLow);
-	});
+			//Check that the reserved amount from the user is (amount of votes^2)
+			let current_balance = Balances::free_balance(&1);
+			assert_eq!(initial_balance as u128, current_balance);
+		});
+	}
+
+	#[test]
+	fn cant_cancel_after_thresshold(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(5);
+			let initial_balance: u32 = 25;
+			let threshold = VoteRemovalThreshold::get();
+			Balances::make_free_balance_be(&1, initial_balance.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), threshold.into()));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
+			
+			assert_noop!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::PassedRemovalThreshold);
+		});
+	}
+
+	#[test]
+	fn proposal_not_found(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+
+			assert_noop!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::ProposalNotFound);
+		});
+	}
+
+	#[test]
+	fn vote_not_found(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_noop!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::VoteNotFound);
+		});
+	}
+
+	#[test]
+	fn ended_proposal(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
+
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(3)));
+
+			System::set_block_number(10);
+
+			assert_noop!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id), Error::<Test>::ProposalAlreadyEnded);
+		});
+	}
 }
 
-#[test]
-fn cast_valid_votes(){
-	new_test_ext().execute_with(|| {
-		//Initial setup
-		System::set_block_number(1);
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-
-		let mut vote = Vote {in_favor: true, amount: 2};
-		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()));
-		System::assert_last_event(Event::VoteCasted { proposal_id, who: 1 }.into());
-
-		assert!(Voting::vote_casted(&1, &proposal_id));
-		let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
-		assert_eq!(updated_proposal.ayes, vote.amount);
-
-		vote.in_favor = false;
-		assert_ok!(Voting::vote(RuntimeOrigin::signed(2), proposal_id, vote.clone()));
-		System::assert_last_event(Event::VoteCasted { proposal_id, who: 2 }.into());
-
-		assert!(Voting::vote_casted(&2, &proposal_id));
-		let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
-		assert_eq!(updated_proposal.nays, vote.amount);
-	});
-}
-
-#[test]
-fn voter_not_registered(){
-	new_test_ext().execute_with(|| {
-		//Initial setup
-		System::set_block_number(1);
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-
-		let vote = Vote {in_favor: true, amount: 2};
-		assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote), Error::<Test>::VoterIsNotRegistered);
-	});
-}
-
-#[test]
-fn vote_already_casted(){
-	new_test_ext().execute_with(|| {
-		//Initial setup
-		System::set_block_number(1);
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-
-		let vote = Vote {in_favor: true, amount: 2};
-		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()));
-		assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()), Error::<Test>::VoteAlreadyCasted);
-	});
-}
-
-#[test]
-fn invalid_vote_amount(){
-	new_test_ext().execute_with(|| {
-		//Initial setup
-		System::set_block_number(1);
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
-
-		let vote = Vote {in_favor: true, amount: 0};
-		assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()), Error::<Test>::InvalidVoteAmount);
-	});
-}
-
-#[test]
-fn proposal_passed(){
-	new_test_ext().execute_with(||{
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
-
-		let vote = Vote {in_favor: true, amount: 1};
-		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()));
-
-		System::set_block_number(6);
-
-		assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-		System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Passed }.into());
-	});
-}
-
-#[test]
-fn proposal_rejected(){
-	new_test_ext().execute_with(||{
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
-
-		let vote = Vote {in_favor: false, amount: 1};
-		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, vote.clone()));
-
-		System::set_block_number(6);
-
-		assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-		System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Rejected }.into());
-	});
-}
-
-#[test]
-fn proposal_tied(){
-	new_test_ext().execute_with(||{
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
-
-		System::set_block_number(6);
-
-		assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-		System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Tied }.into());
-	});
-}
-
-#[test]
-fn finish_proposal_fails_if_canceled(){
-	new_test_ext().execute_with(||{
-		let proposal_id = Voting::get_proposal_counter() + 1;
-		assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
-		assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 5));
-
-		System::set_block_number(6);
-
-		assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-		System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Tied }.into());
-	});
-}
-
-#[test]
-fn finish_proposal_early_rejects(){
-	todo!()
-}
-
-/* #[test]
-fn it_works_for_default_value() {
-	new_test_ext().execute_with(|| {
-		// Go past genesis block so events get deposited
-		System::set_block_number(1);
-		// Dispatch a signed extrinsic.
-		assert_ok!(Voting::do_something(RuntimeOrigin::signed(1), 42));
-		// Read pallet storage and assert an expected result.
-		assert_eq!(Voting::something(), Some(42));
-		// Assert that the correct event was deposited
-		System::assert_last_event(Event::SomethingStored { something: 42, who: 1 }.into());
-	});
-}
-
-#[test]
-fn correct_error_for_none_value() {
-	new_test_ext().execute_with(|| {
-		// Ensure the expected error is thrown when no value is present.
-		assert_noop!(Voting::cause_error(RuntimeOrigin::signed(1)), Error::<Test>::NoneValue);
-	});
-} */

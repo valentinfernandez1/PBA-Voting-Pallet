@@ -21,7 +21,7 @@ use frame_support::{
 		pallet_prelude::*,
 		traits::{Currency, LockableCurrency, ReservableCurrency}, Blake2_128Concat, ensure, 
 	};
-	use frame_system::pallet_prelude::*;
+	use frame_system::pallet_prelude::{*, OriginFor};
 
 	use crate::ProposalId;
 
@@ -40,6 +40,10 @@ use frame_support::{
 		type Currency: Currency<Self::AccountId>
 			+ ReservableCurrency<Self::AccountId>
 			+ LockableCurrency<Self::AccountId>;
+
+		type VoteRemovalThreshold: Get<u32>;
+		
+		type MaxVoters: Get<u32>;
 	}
 
 	#[pallet::storage]
@@ -89,8 +93,14 @@ use frame_support::{
 
 	#[derive(Encode, Debug, Decode, Clone, TypeInfo, MaxEncodedLen, Eq, PartialEq)]
 	pub struct Vote {
-		pub in_favor: bool,
-		pub amount: u32,
+		pub vote_decision: VoteDecision,
+		pub locked: bool
+	}
+
+	#[derive(Encode, Debug, Decode, Clone, TypeInfo, MaxEncodedLen, Eq, PartialEq)]
+	pub enum VoteDecision {
+		Aye(u32),
+		Nay(u32)
 	}
 
 	#[derive(Encode, Debug, Decode, TypeInfo, MaxEncodedLen, Clone, Eq, PartialEq)]
@@ -116,6 +126,8 @@ use frame_support::{
 		VoteCasted {proposal_id: ProposalId, who: T::AccountId},
 		///Registered voter updated his vote with new amount
 		VoteUpdated {proposal_id: ProposalId, who: T::AccountId, previous: u32, new: u32},
+		///A voter canceled his vote for an ongoing proposal
+		VoteCanceled { proposal_id: ProposalId, who: T::AccountId},
 		///Proposal ended and result is defined 
 		ProposalEnded {proposal_id: ProposalId, status: ProposalStatus},
 		///End time for the proposal has been updated
@@ -148,9 +160,15 @@ use frame_support::{
 		///User not authorized to execute extrinsic
 		Unauthorized,
 		///The proposal is already ended, therefore it can not be modified.
-		ProposalAlreadyEnded
-		
-
+		ProposalAlreadyEnded,
+		///Balance for the current vote has already been unreserved.
+		BalanceAlreadyUnocked,
+		///The time left of the propossal is passed the threshold that allows to reduce or cancel votes.
+		PassedRemovalThreshold, 
+		///The proposal is still in progress, therefore the user can't unlock the balance.
+		ProposalInProgress,
+		///Overflow when performing an operation
+		Overflow
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -163,8 +181,8 @@ use frame_support::{
 		#[pallet::weight(0)]
 		pub fn register_voter(
 			origin: OriginFor<T>,
-			who: T::AccountId) 
-		-> DispatchResult {
+			who: T::AccountId
+		) -> DispatchResult {
 			ensure_root(origin)?;
 			ensure!(!Self::is_registered(&who), Error::<T>::AlreadyRegistered);
 
@@ -252,93 +270,171 @@ use frame_support::{
 
 			Ok(())
 		}
-
+		
 		#[pallet::call_index(4)]
 		#[pallet::weight(0)]
 		pub fn vote(
 			origin: OriginFor<T>, 
 			proposal_id: ProposalId,
-			vote: Vote 
+			vote_decision: VoteDecision
 		) -> DispatchResult {
 			//Verify sender is part of register voters
 			let who: T::AccountId = ensure_signed(origin)?;
 			ensure!(Self::is_registered(&who), Error::<T>::VoterIsNotRegistered);
+
+			let proposal = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
+
+			//Check that propossal is not passed removal_treshold
+			let current_block_number = <frame_system::Pallet<T>>::block_number();
+			ensure!(
+				proposal.time_period>current_block_number && proposal.status == ProposalStatus::InProgress, 
+				Error::<T>::ProposalAlreadyEnded
+			);
+			
 			//Verify if voter already casted vote
 			ensure!(!Self::vote_casted(&who, &proposal_id), Error::<T>::VoteAlreadyCasted);
-			
-			ensure!(vote.amount>0, Error::<T>::InvalidVoteAmount);
-			/* Add logic to verify and lock balance
-			
 
-			*/
+			let vote_amount = match vote_decision {
+				VoteDecision::Aye(v) => v,
+				VoteDecision::Nay(v) => v
+			};
 			
+			ensure!(vote_amount >0, Error::<T>::InvalidVoteAmount);
+
+			//Reserve balance corresponding to vote amount^2.
+			let amount_to_reserve: u32 = (vote_amount).checked_pow(2).ok_or(Error::<T>::Overflow)?;
+			T::Currency::reserve(&who, amount_to_reserve.into())?;
+			
+			let vote = Vote { vote_decision: vote_decision.clone(), locked: true};
+
 			//Insert vote and update proposals
 			<Votes<T>>::insert(who.clone(), proposal_id, vote.clone());
+
 			<Proposals<T>>::mutate(proposal_id, |proposal|{
 				if let Some(p) = proposal.as_mut() {
-					if vote.in_favor {p.ayes += vote.amount;} else {p.nays += vote.amount;}
+					match vote_decision {
+						VoteDecision::Aye(v) => p.ayes += v,
+						VoteDecision::Nay(v) => p.nays += v
+					}
 				}
 			});
+			
 			Self::deposit_event(Event::VoteCasted {proposal_id, who});
 			Ok(())
 		}
 
-/* 		#[pallet::call_index(5)]
+
+ 		#[pallet::call_index(5)]
 		#[pallet::weight(0)]
-		pub fn increase_vote(
+		pub fn update_vote(
 			origin: OriginFor<T>, 
 			proposal_id: ProposalId,
-			amount: u32,
+			new_vote_decision: VoteDecision
 		) -> DispatchResult {
 			//Verify sender is part of register voters and vote exists
 			let who: T::AccountId = ensure_signed(origin)?;
 			ensure!(Self::is_registered(&who), Error::<T>::VoterIsNotRegistered);
 
+			let mut proposal = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
+						//Check that propossal is not passed removal_treshold
+			let current_block_number = <frame_system::Pallet<T>>::block_number();
+			ensure!(
+				proposal.time_period>current_block_number && proposal.status == ProposalStatus::InProgress, 
+				Error::<T>::ProposalAlreadyEnded
+			);
+			
 			//Get vote and verify if it exists
-			let vote = <Votes<T>>::try_get(&who, &proposal_id);
-			ensure!(vote.is_ok(), Error::<T>::VoteNotFound);
-			let vote = vote.unwrap();
+			let current_vote = <Votes<T>>::try_get(&who, &proposal_id).ok().ok_or(Error::<T>::VoteNotFound)?;
 
-			ensure!(amount != 0, Error::<T>::InvalidUpdateAmount);
-			/* 
-				Add reserve currency logic
-			*/
+			let current_amount: u32 = match current_vote.vote_decision {
+				VoteDecision::Aye(v) => {
+					proposal.ayes = proposal.ayes.saturating_sub(v);
+					v
+				},
+				VoteDecision::Nay(v) => {
+					proposal.nays = proposal.nays.saturating_sub(v);
+					v
+				},
+			};
 
-			<Votes<T>>::mutate(who.clone(), proposal_id, |vote|{
-				if let Some(v) = vote.as_mut() {
-					v.amount += amount;
+			let new_amount = match new_vote_decision {
+				VoteDecision::Aye(v) => {
+					proposal.ayes += v;
+					v
+				},
+				VoteDecision::Nay(v) => {
+					//Check threshold
+					ensure!(!Self::passed_removal_threshold(&proposal.time_period), Error::<T>::PassedRemovalThreshold);
+					proposal.nays += v;
+					v
 				}
-			});
-			<Proposals<T>>::mutate(proposal_id, |proposal|{
-				if let Some(p) = proposal.as_mut() {
-					if vote.in_favor {p.ayes += vote.amount;} else {p.nays += vote.amount;}
-				}
-			});
+			};
+			
+			ensure!(new_amount != 0, Error::<T>::InvalidUpdateAmount);
+
+			let current_amount_pow: u32 = current_amount.checked_pow(2).ok_or(Error::<T>::Overflow)?;
+			let new_amount_pow: u32 = new_amount.checked_pow(2).ok_or(Error::<T>::Overflow)?;
+
+			//Modify reserved amount
+			match new_amount.cmp(&current_amount){
+				Ordering::Greater => {T::Currency::reserve(&who, (new_amount_pow-current_amount_pow).into())?;},
+				Ordering::Less => {T::Currency::unreserve(&who, (current_amount_pow-new_amount_pow).into());},
+				_ => (),
+			};
+
+
+			let new_vote = Vote {vote_decision: new_vote_decision, locked: true};
+
+			<Votes<T>>::insert(who.clone(), proposal_id, new_vote);
+			<Proposals<T>>::insert(proposal_id, proposal);
 			Self::deposit_event(Event::VoteCasted {proposal_id, who});
 
 			Ok(())
 		}
-
 		
-		#[pallet::call_index(6)]
-		#[pallet::weight(0)]
-		pub fn decrease_vote(
-			origin: OriginFor<T>, 
-			proposal_id: ProposalId,
-			amount: i32,
-		) -> DispatchResult {
-			todo!()
-		}
 		
 		#[pallet::call_index(9)]
 		#[pallet::weight(0)]
-		pub fn remove_vote(
+		pub fn cancel_vote(
 			origin: OriginFor<T>, 
 			proposal_id: ProposalId,
-			amount: i32,
 		) -> DispatchResult {
-			todo!()
-		} */
+			let who: T::AccountId = ensure_signed(origin)?;
+			//Allows to calculate treshold
+
+			let mut proposal = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
+			let vote: Vote = <Votes<T>>::try_get(who.clone(), proposal_id).ok().ok_or(Error::<T>::VoteNotFound)?;
+			let current_block_number = <frame_system::Pallet<T>>::block_number();
+
+			ensure!(
+				proposal.time_period>=current_block_number && proposal.status == ProposalStatus::InProgress, 
+				Error::<T>::ProposalAlreadyEnded
+			);
+			
+			//Check that propossal is not passed removal_treshold
+			ensure!(!Self::passed_removal_threshold(&proposal.time_period), Error::<T>::PassedRemovalThreshold);
+
+			match vote.vote_decision {
+				VoteDecision::Aye(v) =>  proposal.ayes = proposal.ayes.saturating_sub(v),
+				VoteDecision::Nay(v) =>  proposal.nays = proposal.nays.saturating_sub(v),
+			}
+
+			<Proposals<T>>::insert(proposal_id, proposal);
+			<Votes<T>>::remove(who.clone(), proposal_id);
+
+			let vote_amount = match vote.vote_decision {
+				VoteDecision::Aye(v) => v,
+				VoteDecision::Nay(v) => v
+			};
+
+			//unreserve balance corresponding to the vote (amount^2).
+			let amount_to_unreserve: u32 = (vote_amount).checked_pow(2).ok_or(Error::<T>::Overflow)?;
+			T::Currency::unreserve(&who, amount_to_unreserve.into());
+
+			Self::deposit_event(Event::VoteCanceled{proposal_id, who});
+
+			Ok(())
+		} 
 
 		
 		#[pallet::call_index(7)]
@@ -350,13 +446,7 @@ use frame_support::{
 			//Verify sender is part of register voters and vote exists
 			let who: T::AccountId = ensure_signed(origin)?;
 			ensure!(Self::is_registered(&who), Error::<T>::VoterIsNotRegistered);
-			
-			// works but ugly. Avoid and use implementation below this comment
-			//let proposal = Self::get_proposal(&proposal_id);
-			//ensure!(proposal.is_some(), Error::<T>::ProposalNotFound);
-			//let mut proposal: Proposal<T> = proposal.unwrap();
 
-			// same! and even better
 			let mut proposal = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
 
 			let current_block_number = <frame_system::Pallet<T>>::block_number();
@@ -383,8 +473,28 @@ use frame_support::{
 		#[pallet::weight(0)]
 		pub fn unlock_balance(
 			origin: OriginFor<T>, 
+			proposal_id: ProposalId
 		) -> DispatchResult {
-			todo!()
+			let who = ensure_signed(origin)?;
+			let proposal: Proposal<T> = Self::get_proposal(&proposal_id).ok_or(Error::<T>::ProposalNotFound)?;
+			ensure!(proposal.status != ProposalStatus::InProgress, Error::<T>::ProposalInProgress);
+
+			let mut vote: Vote = <Votes<T>>::try_get(who.clone(), proposal_id).ok().ok_or(Error::<T>::VoteNotFound)?;
+			ensure!(vote.locked, Error::<T>::BalanceAlreadyUnocked);
+			vote.locked = false;
+			<Votes<T>>::insert(who.clone(), proposal_id, vote.clone());
+
+			let vote_amount = match vote.vote_decision {
+				VoteDecision::Aye(v) => v,
+				VoteDecision::Nay(v) => v
+			}; 
+			//unreserve balance corresponding to the vote (amount^2).
+			let amount_to_unreserve: u32 = (vote_amount).checked_pow(2).ok_or(Error::<T>::Overflow)?;
+			T::Currency::unreserve(&who, amount_to_unreserve.into());
+
+			//Should add event??
+
+			Ok(())
 		} 
 	}
 	
@@ -406,59 +516,12 @@ use frame_support::{
 			if <Votes<T>>::try_get(who, proposal_id).is_err() {return false};
 			true
 		}
+		pub fn passed_removal_threshold(end_time_period: &T::BlockNumber) -> bool {
+			let current_block_number = <frame_system::Pallet<T>>::block_number();
+
+			let difference = *end_time_period - current_block_number;
+			difference < T::VoteRemovalThreshold::get().into()
+		}
 	}
 }
 
-
-//Anotations
-// Desibil users:
-//	Created a list of registered voters
-// Proposal<T> structure: struct with lots of derives like decode encode typeinfo maxencodedlen
-// 	data from struct, types hardcoded
-// 	enum of proposalStatus
-// 	Write on top of proposal [scale_info(skip_tyoe_params(T)))]
-// Close strategies:
-// 	Hooks(not recommended)
-//	proposer closes the voting.
-// 	if voter calls and past blocklimit voting is closed
-//		search in collective pallet Pays::no so the last voter doesn't pay the fee for closing the voting. 
-
-
-/* 		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[pallet::call_index(0)]
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1).ref_time())]
-		pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResult {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://docs.substrate.io/main-docs/build/origins/
-			let who = ensure_signed(origin)?;
-
-			// Update storage.
-			<Something<T>>::put(something);
-
-			// Emit an event.
-			Self::deposit_event(Event::SomethingStored { something, who });
-			// Return a successful DispatchResultWithPostInfo
-			Ok(())
-		} */
-
-		// An example dispatchable that may throw a custom error.
-/* 		#[pallet::call_index(1)]
-		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1).ref_time())]
-		pub fn cause_error(origin: OriginFor<T>) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-
-			// Read a value from storage.
-			match <Something<T>>::get() {
-				// Return an error if the value has not been set.
-				None => return Err(Error::<T>::NoneValue.into()),
-				Some(old) => {
-					// Increment the value read from storage; will error in the event of overflow.
-					let new = old.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					// Update the value in storage with the incremented result.
-					<Something<T>>::put(new);
-					Ok(())
-				},
-			}
-		} */
