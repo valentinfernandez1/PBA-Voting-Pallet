@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+
 pub use pallet::*;
 
 #[cfg(test)]
@@ -10,6 +11,10 @@ mod tests;
 
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
+
+mod types;
+
+pub use types::{Proposal, ProposalStatus, Vote, VoteDecision};
 
 pub type ProposalId = u32;
 
@@ -23,7 +28,7 @@ use frame_support::{
 	};
 	use frame_system::pallet_prelude::{*, OriginFor};
 
-	use crate::ProposalId;
+	use crate::{ProposalId, Proposal, VoteDecision, ProposalStatus, Vote};
 
 	pub type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -44,10 +49,15 @@ use frame_support::{
 		type VoteRemovalThreshold: Get<u32>;
 		
 		type MaxVoters: Get<u32>;
+
+		type VoteLimit: Get<u32>;
 	}
 
 	#[pallet::storage]
 	pub type RegisteredVoters<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, ()>;
+
+	#[pallet::storage]
+	pub type AmountVoters<T: Config> = StorageValue<_, u32>;
 	
 	#[pallet::storage]
 	pub type Proposals<T: Config> = StorageMap<_, Blake2_128Concat, ProposalId , Proposal<T>>;
@@ -58,60 +68,6 @@ use frame_support::{
 
 	#[pallet::storage]
 	pub type ProposalCounter<T: Config> = StorageValue<_, ProposalId>;
-	
-
-	#[derive(Encode, Decode, TypeInfo, MaxEncodedLen, Clone)]
-	#[scale_info(skip_type_params(T))]
-	pub struct Proposal<T: Config> {
-		pub id: ProposalId,
-		pub proposer: T::AccountId,
-		pub text: T::Hash,
-		pub time_period: T::BlockNumber,
-		pub status: ProposalStatus,
-		pub ayes: u32,
-		pub nays: u32,
-	}
-
-	impl<T: Config> Proposal<T> {
-		fn new (
-			id: ProposalId, 
-			proposer: T::AccountId, 
-			text: T::Hash, 
-			time_period: T::BlockNumber
-		) -> Self {
-			Proposal { 
-				id, 
-				proposer, 
-				text, 
-				time_period, 
-				status: ProposalStatus::InProgress, 
-				ayes: 0, 
-				nays: 0 
-			}
-		}
-	}
-
-	#[derive(Encode, Debug, Decode, Clone, TypeInfo, MaxEncodedLen, Eq, PartialEq)]
-	pub struct Vote {
-		pub vote_decision: VoteDecision,
-		pub locked: bool
-	}
-
-	#[derive(Encode, Debug, Decode, Clone, TypeInfo, MaxEncodedLen, Eq, PartialEq)]
-	pub enum VoteDecision {
-		Aye(u32),
-		Nay(u32)
-	}
-
-	#[derive(Encode, Debug, Decode, TypeInfo, MaxEncodedLen, Clone, Eq, PartialEq)]
-	#[scale_info(skip_type_params(T))]
-	pub enum ProposalStatus {
-		InProgress,
-		Canceled,
-		Passed,
-		Rejected,
-		Tied,
-	}
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
@@ -133,7 +89,9 @@ use frame_support::{
 		///End time for the proposal has been updated
 		ProposalUpdated {proposal_id: ProposalId, end_block: T::BlockNumber},
 		///Proposal canceled by the proposer
-		ProposalCanceled {proposal_id: ProposalId}
+		ProposalCanceled {proposal_id: ProposalId},
+		///User unlocked balance of a specific proposal 
+		BalanceUnlocked {proposal_id: ProposalId, who: T::AccountId}
 	}
 
 	// Errors inform users that something went wrong.s
@@ -143,10 +101,14 @@ use frame_support::{
 		AlreadyRegistered,
 		///Voter is not registered to cast vote
 		VoterIsNotRegistered,
+		///The amount of registered voters limit has been reached
+		MaxVotersLimitReached,
 		///The vote of the voter for the proposal is already registered.
 		VoteAlreadyCasted,
 		///Vote not found for user and proposal
 		VoteNotFound,
+		///Received vote amount is over the vote limit
+		VoteAmountLimit,
 		///Reduction of votes not allowed after 
 		InvalidVoteAmount,
 		///The received amount of votes to update is invalid.
@@ -186,7 +148,12 @@ use frame_support::{
 			ensure_root(origin)?;
 			ensure!(!Self::is_registered(&who), Error::<T>::AlreadyRegistered);
 
-			RegisteredVoters::<T>::insert(who.clone(), ());
+			let amount_voters: u32 = <AmountVoters<T>>::try_get().unwrap_or_default();
+			ensure!(amount_voters < T::MaxVoters::get(), Error::<T>::MaxVotersLimitReached);
+
+			<RegisteredVoters<T>>::insert(who.clone(), ());
+			<AmountVoters<T>>::put(amount_voters.saturating_add(1));
+
 			Self::deposit_event(Event::VoterRegistered { who });
 			Ok(())
 		}
@@ -213,8 +180,8 @@ use frame_support::{
 				time_period
 			);
 
-			Proposals::<T>::insert(proposal_id, new_proposal);
-			ProposalCounter::<T>::put(proposal_id);
+			<Proposals<T>>::insert(proposal_id, new_proposal);
+			<ProposalCounter<T>>::put(proposal_id);
 			Self::deposit_event(Event::ProposalSubmitted { proposal_id, who });
 
 			Ok(())
@@ -300,6 +267,7 @@ use frame_support::{
 			};
 			
 			ensure!(vote_amount >0, Error::<T>::InvalidVoteAmount);
+			ensure!(vote_amount <= T::VoteLimit::get(), Error::<T>::VoteAmountLimit);
 
 			//Reserve balance corresponding to vote amount^2.
 			let amount_to_reserve: u32 = (vote_amount).checked_pow(2).ok_or(Error::<T>::Overflow)?;
@@ -373,6 +341,7 @@ use frame_support::{
 			}
 			
 			ensure!(new_amount != 0, Error::<T>::InvalidUpdateAmount);
+			ensure!(new_amount <= T::VoteLimit::get(), Error::<T>::VoteAmountLimit);
 
 			let current_amount_pow: u32 = current_amount.checked_pow(2).ok_or(Error::<T>::Overflow)?;
 			let new_amount_pow: u32 = new_amount.checked_pow(2).ok_or(Error::<T>::Overflow)?;
@@ -499,7 +468,7 @@ use frame_support::{
 			let amount_to_unreserve: u32 = (vote_amount).checked_pow(2).ok_or(Error::<T>::Overflow)?;
 			T::Currency::unreserve(&who, amount_to_unreserve.into());
 
-			//Should add event??
+			Self::deposit_event(Event::BalanceUnlocked {proposal_id, who});
 
 			Ok(())
 		} 

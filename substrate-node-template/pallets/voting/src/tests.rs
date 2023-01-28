@@ -1,8 +1,6 @@
 use crate::{mock::*, Error, Event, Proposal, ProposalStatus, VoteDecision};
 use frame_support::{assert_noop, assert_ok, traits::{Currency}};
 
-
-
 mod register_voter {
 	use super::*;	
 	
@@ -26,6 +24,15 @@ mod register_voter {
 	fn register_invalid_origin(){
 		new_test_ext().execute_with(|| {
 			assert_noop!(Voting::register_voter(RuntimeOrigin::signed(1), 2), sp_runtime::DispatchError::BadOrigin);
+		});
+	}
+
+	#[test]
+	fn reached_max_voters(){
+		new_test_ext().execute_with(|| {
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
+			MaxVoters::set(1);
+			assert_noop!(Voting::register_voter(RuntimeOrigin::root(), 3), Error::<Test>::MaxVotersLimitReached);
 		});
 	}
 	
@@ -215,6 +222,21 @@ mod vote {
 	}
 
 	#[test]
+	fn vote_over_limit(){
+		new_test_ext().execute_with(|| {
+			//Initial setup
+			System::set_block_number(1);
+			Balances::make_free_balance_be(&1, 25u32.into());
+			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
+
+			let vote_limit: u32 = VoteLimit::get();
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_limit+1)), Error::<Test>::VoteAmountLimit);
+		});
+	}
+
+	#[test]
 	fn invalid_proposal(){
 		new_test_ext().execute_with(|| {
 			//Initial setup
@@ -353,6 +375,7 @@ mod unlock_balance {
 
 		(initial_balance, proposal_id)
 	}
+
 	#[test]
 	fn unlock_balance(){
 		new_test_ext().execute_with(||{
@@ -364,9 +387,11 @@ mod unlock_balance {
 
 			//try to unlock balance
 			assert_ok!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id));
+			System::assert_last_event(Event::BalanceUnlocked { proposal_id, who: 1 }.into());
 			//Check that the reserved amount from the user is (amount of votes^2)
 			let current_balance = Balances::free_balance(&1);
 			assert_eq!(initial_balance as u128, current_balance);
+
 		});
 	}
 
@@ -642,6 +667,21 @@ mod update_vote {
 		});
 	}
 
+	#[test]
+	fn vote_over_limit(){
+		new_test_ext().execute_with(|| {
+			let (_, proposal_id) = before_each(50);
+
+			let vote_amount: u32 = 3;
+			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_amount)));
+
+			let vote_limit: u32 = VoteLimit::get();
+			assert_noop!(
+				Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_limit+1)),
+				Error::<Test>::VoteAmountLimit
+			);
+		});
+	}
 	#[test]
 	fn vote_not_found(){
 		new_test_ext().execute_with(|| {
