@@ -307,10 +307,19 @@ impl pallet_assets::Config for Runtime {
 	type BenchmarkHelper = ();
 }
 
+parameter_types! {
+	pub const MaxVoters: u32 = 100;
+	pub const VoteRemovalThreshold: u32 = 20;
+	pub const VoteLimit: u32 = 5;
+}
+
 /// Configure the pallet-voting in pallets/voting.
 impl pallet_voting::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
+	type MaxVoters = MaxVoters;
+	type VoteLimit = VoteLimit;
+	type VoteRemovalThreshold = VoteRemovalThreshold;
 }
 
 pub struct AuthorityToAccount;

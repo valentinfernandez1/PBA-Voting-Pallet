@@ -13,7 +13,7 @@ mod register_voter {
 			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
 			assert!(Voting::is_registered(&2));
 			assert!(System::events().len() == 1);
-			System::assert_last_event(Event::VoterRegistered { who: 2 }.into());
+			System::assert_has_event(Event::VoterRegistered { who: 2 }.into());
 
 			//Try to re-register the same voter;
 			assert_noop!(Voting::register_voter(RuntimeOrigin::root(), 2), Error::<Test>::AlreadyRegistered);
@@ -47,12 +47,12 @@ mod create_proposal {
 			System::set_block_number(82);
 			let initial_proposal_id = Voting::get_proposal_counter();
 			let new_proposal_id = initial_proposal_id + 1; 
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 			assert!(Voting::proposal_exists(new_proposal_id));
 
-			assert!(System::events().len() == 1);
-			System::assert_last_event(Event::ProposalSubmitted { proposal_id: new_proposal_id, who: 1 }.into());
+			System::assert_has_event(Event::ProposalSubmitted { proposal_id: new_proposal_id, who: 1 }.into());
 
 			assert_eq!(initial_proposal_id+1, Voting::get_proposal_counter());
 		});
@@ -63,6 +63,7 @@ mod create_proposal {
 	fn proposal_time_low(){
 		new_test_ext().execute_with(|| {
 			System::set_block_number(82);
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 			
 			assert_noop!(Voting::make_proposal(
 				RuntimeOrigin::signed(1), 
@@ -72,9 +73,20 @@ mod create_proposal {
 
 		});
 	}
+
+	#[test]
+	fn proposer_not_registeredd(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(82);
+			let initial_proposal_id = Voting::get_proposal_counter();
+			let new_proposal_id = initial_proposal_id + 1; 
+
+			assert_noop!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90), Error::<Test>::VoterIsNotRegistered);
+		});
+	}
 }
 
-mod update_proposal_time {
+mod increase_proposal_time {
 	use super::*;	
 	
 	#[test]
@@ -82,14 +94,26 @@ mod update_proposal_time {
 		new_test_ext().execute_with(|| {
 			System::set_block_number(30);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 			assert_ok!(Voting::increase_proposal_time(RuntimeOrigin::signed(1), proposal_id, 95));
 
-			System::assert_last_event(Event::ProposalUpdated { proposal_id, end_block: 95 }.into());
+			System::assert_has_event(Event::ProposalUpdated { proposal_id, end_block: 95 }.into());
 
 			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
 			assert_eq!(updated_proposal.time_period, 95)
+		});
+	}
+
+	#[test]
+	fn proposer_not_registered(){
+		new_test_ext().execute_with(|| {
+			System::set_block_number(30);
+			let proposal_id = Voting::get_proposal_counter() + 1;
+
+			assert_noop!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90), Error::<Test>::VoterIsNotRegistered);
 		});
 	}
 
@@ -98,6 +122,7 @@ mod update_proposal_time {
 		new_test_ext().execute_with(|| {
 			System::set_block_number(30);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 			assert_noop!(
@@ -112,6 +137,8 @@ mod update_proposal_time {
 		new_test_ext().execute_with(|| {
 			System::set_block_number(30);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 2));
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 			assert_noop!(
@@ -130,10 +157,11 @@ mod cancel_proposal {
 		new_test_ext().execute_with(|| {
 			System::set_block_number(30);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 			assert_ok!(Voting::cancel_proposal(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::ProposalCanceled { proposal_id }.into());
+			System::assert_has_event(Event::ProposalCanceled { proposal_id }.into());
 
 			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
 			assert_eq!(updated_proposal.status, ProposalStatus::Canceled);
@@ -145,6 +173,7 @@ mod cancel_proposal {
 		new_test_ext().execute_with(|| {
 			System::set_block_number(30);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 
@@ -173,7 +202,7 @@ mod vote {
 			//Vote in favor and verify that the functions excecutes properly and the event is created
 			let vote_amount: u32 = 2;
 			assert_ok!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_amount)));
-			System::assert_last_event(Event::VoteCasted { proposal_id, who: 1 }.into());
+			System::assert_has_event(Event::VoteCasted { proposal_id, who: 1 }.into());
 			
 			//Check that the reserved amount from the user is (amount of votes^2)
 			let user_balance = Balances::free_balance(&1);
@@ -187,7 +216,7 @@ mod vote {
 			//Vote nay and verify that the changes are correct in storage
 			Balances::make_free_balance_be(&2, 25u32.into());
 			assert_ok!(Voting::vote(RuntimeOrigin::signed(2), proposal_id, VoteDecision::Nay(vote_amount)));
-			System::assert_last_event(Event::VoteCasted { proposal_id, who: 2 }.into());
+			System::assert_has_event(Event::VoteCasted { proposal_id, who: 2 }.into());
 			assert!(Voting::vote_casted(&2, &proposal_id));
 			let updated_proposal: Proposal<Test> = Voting::get_proposal(&proposal_id).unwrap();
 			assert_eq!(updated_proposal.nays, vote_amount);
@@ -200,9 +229,10 @@ mod vote {
 			//Initial setup
 			System::set_block_number(1);
 			let proposal_id = Voting::get_proposal_counter() + 1;
+			assert_ok!(Voting::register_voter(RuntimeOrigin::root(), 1));
 			assert_ok!(Voting::make_proposal(RuntimeOrigin::signed(1), sp_core::H256::zero(), 90));
 
-			assert_noop!(Voting::vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(1)), Error::<Test>::VoterIsNotRegistered);
+			assert_noop!(Voting::vote(RuntimeOrigin::signed(2), proposal_id, VoteDecision::Aye(1)), Error::<Test>::VoterIsNotRegistered);
 		});
 	}
 
@@ -296,7 +326,7 @@ mod finish_proposal {
 			System::set_block_number(6);
 
 			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Passed }.into());
+			System::assert_has_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Passed }.into());
 		});
 	}
 
@@ -315,7 +345,7 @@ mod finish_proposal {
 			System::set_block_number(6);
 
 			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Rejected }.into());
+			System::assert_has_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Rejected }.into());
 		});
 	}
 
@@ -331,7 +361,7 @@ mod finish_proposal {
 			System::set_block_number(6);
 
 			assert_ok!(Voting::finish_proposal(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Tied }.into());
+			System::assert_has_event(Event::ProposalEnded { proposal_id, status: ProposalStatus::Tied }.into());
 		});
 	}
 
@@ -387,7 +417,7 @@ mod unlock_balance {
 
 			//try to unlock balance
 			assert_ok!(Voting::unlock_balance(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::BalanceUnlocked { proposal_id, who: 1 }.into());
+			System::assert_has_event(Event::BalanceUnlocked { proposal_id, who: 1 }.into());
 			//Check that the reserved amount from the user is (amount of votes^2)
 			let current_balance = Balances::free_balance(&1);
 			assert_eq!(initial_balance as u128, current_balance);
@@ -459,7 +489,7 @@ mod cancel_vote {
 			let (initial_balance, proposal_id) = before_each(40);
 
 			assert_ok!(Voting::cancel_vote(RuntimeOrigin::signed(1), proposal_id));
-			System::assert_last_event(Event::VoteCanceled { proposal_id, who: 1 }.into());
+			System::assert_has_event(Event::VoteCanceled { proposal_id, who: 1 }.into());
 
 			//Check that the reserved amount from the user is (amount of votes^2)
 			let current_balance = Balances::free_balance(&1);
@@ -542,7 +572,7 @@ mod update_vote {
 			let proposal_before_update = Voting::get_proposal(&proposal_id).unwrap();
 
 			assert_ok!(Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_amount+1)));
-			System::assert_last_event(Event::<Test>::VoteUpdated {
+			System::assert_has_event(Event::<Test>::VoteUpdated {
 				proposal_id, 
 				who: 1,
 				previous: VoteDecision::Aye(vote_amount),
@@ -569,7 +599,7 @@ mod update_vote {
 			let proposal_before_update = Voting::get_proposal(&proposal_id).unwrap();
 
 			assert_ok!(Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Aye(vote_amount-1)));
-			System::assert_last_event(Event::<Test>::VoteUpdated {
+			System::assert_has_event(Event::<Test>::VoteUpdated {
 				proposal_id, 
 				who: 1,
 				previous: VoteDecision::Aye(vote_amount),
@@ -596,7 +626,7 @@ mod update_vote {
 			let proposal_before_update = Voting::get_proposal(&proposal_id).unwrap();
 
 			assert_ok!(Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Nay(vote_amount+1)));
-			System::assert_last_event(Event::<Test>::VoteUpdated {
+			System::assert_has_event(Event::<Test>::VoteUpdated {
 				proposal_id, 
 				who: 1,
 				previous: VoteDecision::Nay(vote_amount),
@@ -623,7 +653,7 @@ mod update_vote {
 			let proposal_before_update = Voting::get_proposal(&proposal_id).unwrap();
 
 			assert_ok!(Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Nay(vote_amount-1)));
-			System::assert_last_event(Event::<Test>::VoteUpdated {
+			System::assert_has_event(Event::<Test>::VoteUpdated {
 				proposal_id, 
 				who: 1,
 				previous: VoteDecision::Nay(vote_amount),
@@ -650,7 +680,7 @@ mod update_vote {
 			let proposal_before_update = Voting::get_proposal(&proposal_id).unwrap();
 
 			assert_ok!(Voting::update_vote(RuntimeOrigin::signed(1), proposal_id, VoteDecision::Nay(vote_amount)));
-			System::assert_last_event(Event::<Test>::VoteUpdated {
+			System::assert_has_event(Event::<Test>::VoteUpdated {
 				proposal_id, 
 				who: 1,
 				previous: VoteDecision::Aye(vote_amount),
