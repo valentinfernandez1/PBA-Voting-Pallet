@@ -425,6 +425,8 @@ pub mod pallet {
 		///has not been surpassed.
 		///
 		/// It then updates the count of votes in favor (ayes) or against (nays) accordingly.
+		/// 
+		/// Returns the reserved balance to the voter
 		#[pallet::call_index(9)]
 		#[pallet::weight(0)]
 		pub fn cancel_vote(origin: OriginFor<T>, proposal_id: ProposalId) -> DispatchResult {
